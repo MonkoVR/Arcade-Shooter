@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arcade Shooter Game - Main Menu & Modes</title>
+    
+    <!-- CSS styles embedded within the <style> tag -->
+    <style>
+        body {
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background-color: #333;
+            color: white;
+            font-family: Arial, sans-serif;
+        }
+
+        canvas {
+            background-color: #000; /* Black background for space theme */
+            border: 2px solid #fff;
+        }
+
+        #gameContainer {
+            position: relative;
+            width: 600px;
+            height: 400px;
+        }
+
+        #mainMenu, #gameOverScreen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+            background-color: rgba(0, 0, 0, 0.9); /* Dark overlay */
+            padding: 40px;
+            border-radius: 10px;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+            text-align: center;
+        }
+
+        #gameOverScreen {
+            display: none; /* Hide Game Over screen initially */
+        }
+
+        .menuButton {
+            padding: 15px 30px;
+            font-size: 1.2rem;
+            cursor: pointer;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            transition: background-color 0.3s;
+        }
+
+        .menuButton:hover {
+            background-color: #0056b3;
+        }
+
+        h1, h2 {
+            margin: 0;
+        }
+    </style>
+</head>
+<body>
+    <!-- Game Container wraps canvas and overlays -->
+    <div id="gameContainer">
+        <!-- The main menu container -->
+        <div id="mainMenu">
+            <h1>Arcade Shooter</h1>
+            <button class="menuButton" onclick="startGame('easy')">Play (Easy Mode)</button>
+            <button class="menuButton" onclick="startGame('hard')">Play (Hard Mode)</button>
+        </div>
+
+        <!-- The canvas element is where all the game drawing happens -->
+        <canvas id="gameCanvas" width="600" height="400"></canvas>
+        
+        <!-- The Game Over screen container -->
+        <div id="gameOverScreen">
+            <h1 style="color: #ff0000;">GAME OVER</h1>
+            <h2 id="finalScoreText">Final Score: 0</h2>
+            <button class="menuButton" onclick="showMainMenu()">Retry / Change Mode</button>
+        </div>
+    </div>
+    
+    <!-- JavaScript logic embedded within the <script> tag -->
+    <script>
+        // --- Sound Manager (Simple Tone Generation) ---
+        function playSound(frequency, duration) {
+            try {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const oscillator = audioContext.createOscillator();
+                const gainNode = audioContext.createGain();
+
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+
+                gainNode.gain.setValueAtTime(0.5, audioContext.currentTime);
+
+                oscillator.type = 'sine'; // Sine wave for smoother tones
+                oscillator.frequency.setValueAtTime(frequency, audioContext.currentTime);
+
+                oscillator.start(audioContext.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + duration);
+                oscillator.stop(audioContext.currentTime + duration);
+            } catch (e) {
+                // Fallback for browsers that don't support AudioContext in an inactive tab
+                console.warn("AudioContext not supported or active. Sound effects disabled.");
+            }
+        }
+
+        function playShootSound() {
+            playSound(1000, 0.05); // High pitched pop sound
+        }
+
+        function playDamageSound() {
+            playSound(300, 0.2); // Low pitched thump/buzz
+        }
+
+        function playGameOverSound() {
+            // A quick descending tone
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const oscillator = audioContext.createOscillator();
+            oscillator.connect(audioContext.destination);
+            oscillator.frequency.setValueAtTime(500, audioContext.currentTime);
+            oscillator.frequency.linearRampToValueAtTime(100, audioContext.currentTime + 0.5);
+            oscillator.start(audioContext.currentTime);
+            oscillator.stop(audioContext.currentTime + 0.5);
+        }
+
+        // --- DOM Element References ---
+        const gameContainer = document.getElementById('gameContainer');
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const mainMenu = document.getElementById('mainMenu');
+        const gameOverScreen = document.getElementById('gameOverScreen');
+        const finalScoreText = document.getElementById('finalScoreText');
+
+        const CANVAS_WIDTH = canvas.width;
+        const CANVAS_HEIGHT = canvas.height;
+        const MAX_HEALTH = 100;
+
+        let score = 0;
+        let gameOver = false;
+        let enemySpawnInterval;
+        let gameMode = 'hard'; // Default mode
+        let spawnRateMultiplier = 1; // Used to adjust spawn rate based on mode
+        let playerHealth = MAX_HEALTH; // Player starts with 100 health
+
+        // --- Game Objects Classes ---
+
+        // Generic Square object for player, bullets, and enemies
+        class Square {
+            constructor(x, y, size, speed, color) {
+                this.x = x;
+                this.y = y;
+                this.size = size;
+                this.speed = speed;
+                this.color = color;
+            }
+
+            draw() {
+                ctx.fillStyle = this.color;
+                ctx.fillRect(this.x, this.y, this.size, this.size);
+            }
+
+            isColliding(other) {
+                return (
+                    this.x < other.x + other.size &&
+                    this.x + this.size > other.x &&
+                    this.y < other.y + other.size &&
+                    this.y + this.size > other.y
+                );
+            }
+        }
+
+        // Player Ship with visual health bar logic and hit effect
+        class PlayerShip extends Square {
+            constructor(x, y, size, speed, color) {
+                super(x, y, size, speed, color);
+                this.originalColor = color;
+                this.hitColor = '#ff4500'; // Change to orange on hit
+                this.isHit = false;
+                this.hitTimer = 0;
+            }
+            
+            draw() {
+                if (this.isHit) {
+                    ctx.fillStyle = this.hitColor;
+                    this.hitTimer--;
+                    if (this.hitTimer <= 0) {
+                        this.isHit = false;
+                        this.color = this.originalColor;
+                    }
+                } else {
+                     ctx.fillStyle = this.color;
+                }
+                ctx.fillRect(this.x, this.y, this.size, this.size);
+
+                // Draw Health Bar above the player
+                const healthBarWidth = this.size;
+                const healthBarHeight = 4;
+                const healthBarY = this.y - healthBarHeight - 2; 
+
+                ctx.fillStyle = '#555';
+                ctx.fillRect(this.x, healthBarY, healthBarWidth, healthBarHeight);
+
+                const healthPercentage = playerHealth / MAX_HEALTH;
+                const currentHealthWidth = healthBarWidth * healthPercentage;
+                
+                if (healthPercentage > 0.5) {
+                    ctx.fillStyle = '#00ff00'; // Green
+                } else if (healthPercentage > 0.25) {
+                    ctx.fillStyle = '#ffa500'; // Orange
+                } else {
+                    ctx.fillStyle = '#ff0000'; // Red
+                }
+                
+                ctx.fillRect(this.x, healthBarY, currentHealthWidth, healthBarHeight);
+            }
+
+            onHit() {
+                this.isHit = true;
+                this.hitTimer = 10; // Flash for a few frames
+            }
+        }
+
+        const player = new PlayerShip(50, CANVAS_HEIGHT / 2 - 15, 30, 5, '#00ff00');
+
+        // Bullets
+        let playerBullets = [];
+        const BULLET_SPEED = 7;
+        const BULLET_SIZE = 5;
+        let spacePressed = false; 
+
+        function shoot() {
+            if (gameOver || spacePressed) return; 
+
+            const bullet = new Square(
+                player.x + player.size,
+                player.y + player.size / 2 - BULLET_SIZE / 2,
+                BULLET_SIZE,
+                BULLET_SPEED,
+                '#ffffff' 
+            );
+            playerBullets.push(bullet);
+            playShootSound(); // Play sound when shooting
+            spacePressed = true; 
+        }
+
+        class Projectile extends Square {
+            constructor(x, y, targetX, targetY, speed, color, isSeeking = false) {
+                super(x, y, 5, speed, color); 
+                this.isSeeking = isSeeking;
+                if (this.isSeeking) {
+                    const dx = targetX - this.x;
+                    const dy = targetY - this.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    if (distance > 0) {
+                        this.velocityX = (dx / distance) * speed;
+                        this.velocityY = (dy / distance) * speed;
+                    } else {
+                        this.velocityX = speed;
+                        this.velocityY = 0;
+                    }
+                } else {
+                    this.velocityX = speed; 
+                    this.velocityY = 0;
+                }
+            }
+
+            updateMovement() {
+                this.x += this.velocityX;
+                this.y += this.velocityY;
+            }
+        }
+
+        // Enemies
+        let enemies = [];
+        let enemyBaseSpeed = 2;
+        const ENEMY_SIZE_MIN = 15;
+        const ENEMY_SIZE_MAX = 30;
+        let enemyProjectiles = []; // Array for enemy shots
+
+        class TankEnemy extends Square {
+            constructor(x, y, size, speed, color) {
+                super(x, y, size, speed * 0.7, color); 
+                this.health = 2; 
+                this.originalColor = color;
+                this.hitColor = '#ff6347'; 
+            }
+        }
+
+        class ShootingEnemy extends Square {
+            constructor(x, y, size, speed, color) {
+                super(x, y, size, speed, color);
+                this.health = 1; 
+                const shootIntervalTime = gameMode === 'easy' ? 2500 + Math.random() * 1500 : 1200 + Math.random() * 800;
+                this.shootInterval = setInterval(() => this.shoot(), shootIntervalTime);
+            }
+
+            shoot() {
+                if (gameOver) return; 
+
+                const projectile = new Projectile(
+                    this.x,
+                    this.y + this.size / 2, 
+                    player.x + player.size / 2, 
+                    player.y + player.size / 2, 
+                    4, 
+                    '#ff4500', 
+                    true 
+                );
+                enemyProjectiles.push(projectile);
+            }
+
+            destroy() {
+                clearInterval(this.shootInterval);
+            }
+        }
+        
+        class JumpingEnemy extends Square {
+            constructor(x, y, size, speed, color) {
+                super(x, y, size, speed, color);
+                this.health = 1; 
+                this.verticalSpeed = (Math.random() * 2 + 1) * (Math.random() > 0.5 ? 1 : -1); 
+            }
+
+            updateMovement() {
+                this.x -= this.speed; 
+                this.y += this.verticalSpeed; 
+
+                if (this.y < 0 || this.y + this.size > CANVAS_HEIGHT) {
+                    this.verticalSpeed *= -1;
+                }
+            }
+        }
+
+        function spawnEnemy() {
+            if (gameOver) return;
+
+            const size = Math.random() * (ENEMY_SIZE_MAX - ENEMY_SIZE_MIN) + ENEMY_SIZE_MIN;
+            const y = Math.random() * (CANVAS_HEIGHT - size);
+            const speed = Math.random() * enemyBaseSpeed + enemyBaseSpeed;
+            
+            const enemyType = Math.random();
+
+            if (enemyType < 0.35) { 
+                 enemies.push(new Square(CANVAS_WIDTH, y, size, speed, '#ff0000')); 
+                 enemies[enemies.length - 1].health = 1; 
+            } else if (enemyType < 0.7) { 
+                 enemies.push(new ShootingEnemy(CANVAS_WIDTH, y, size, speed, '#ffa500')); 
+            } else if (enemyType < 0.85) { 
+                enemies.push(new TankEnemy(CANVAS_WIDTH, y, size * 1.2, speed, '#0000ff')); 
+            } else { 
+                enemies.push(new JumpingEnemy(CANVAS_WIDTH, y, size, speed, '#8a2be2')); 
+            }
+        }
+
+        // --- Game Loop and Logic ---
+
+        const keys = {
+            up: false, down: false, left: false, right: false,
+        };
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowUp' || e.key === 'w') keys.up = true;
+            if (e.key === 'ArrowDown' || e.key === 's') keys.down = true;
+            if (e.key === 'ArrowLeft' || e.key === 'a') keys.left = true;
+            if (e.key === 'ArrowRight' || e.key === 'd') keys.right = true;
+            if (e.key === ' ') {
+                if (!spacePressed) shoot(); 
+            }
+        });
+
+        document.addEventListener('keyup', (e) => {
+            if (e.key === 'ArrowUp' || e.key === 'w') keys.up = false;
+            if (e.key === 'ArrowDown' || e.key === 's') keys.down = false;
+            if (e.key === 'ArrowLeft' || e.key === 'a') keys.left = false;
+            if (e.key === 'ArrowRight' || e.key === 'd') keys.right = false;
+            if (e.key === ' ') {
+                spacePressed = false; 
+            }
+        });
+
+
+        function updatePlayerPosition() {
+            if (keys.up && player.y > 0) player.y -= player.speed;
+            if (keys.down && player.y < CANVAS_HEIGHT - player.size) player.y += player.speed;
+            if (keys.left && player.x > 0) player.x -= player.speed;
+            if (keys.right && player.x < CANVAS_WIDTH - player.size) player.x += player.speed;
+        }
+        
+        function takeDamage(amount) {
+            if (gameOver) return;
+
+            playerHealth -= amount;
+            player.onHit(); // Trigger visual hit effect on player ship
+            playDamageSound(); // Play damage sound effect
+            if (playerHealth <= 0) {
+                playerHealth = 0; 
+                endGame();
+            }
+        }
+
+        function updateGameArea() {
+            ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+            if (gameOver) {
+                return; 
+            }
+
+            updatePlayerPosition();
+            player.draw(); 
+
+            for (let i = playerBullets.length - 1; i >= 0; i--) {
+                const bullet = playerBullets[i];
+                bullet.x += bullet.speed;
+                bullet.draw();
+                if (bullet.x > CANVAS_WIDTH) {
+                    playerBullets.splice(i, 1);
+                }
+            }
+
+            for (let i = enemies.length - 1; i >= 0; i--) {
+                const enemy = enemies[i];
+                if (typeof enemy.updateMovement === 'function') {
+                    enemy.updateMovement();
+                } else {
+                    enemy.x -= enemy.speed;
+                }
+                enemy.draw();
+
+                if (player.isColliding(enemy)) {
+                    playerHealth = 0; 
+                    endGame();
+                    return; 
+                }
+
+                if (enemy.x + enemy.size < 0) {
+                    enemies.splice(i, 1);
+                    if (typeof enemy.destroy === 'function') enemy.destroy(); 
+                    takeDamage(10); // Deal 10 damage to player for a passed enemy
+                }
+            }
+
+            for (let i = enemyProjectiles.length - 1; i >= 0; i--) {
+                const projectile = enemyProjectiles[i];
+                projectile.updateMovement();
+                projectile.draw();
+
+                if (player.isColliding(projectile)) {
+                    enemyProjectiles.splice(i, 1);
+                    takeDamage(5); // Deal 5 damage for being hit by a projectile
+                }
+
+                if (projectile.x < 0 || projectile.x > CANVAS_WIDTH || projectile.y < 0 || projectile.y > CANVAS_HEIGHT) {
+                    enemyProjectiles.splice(i, 1);
+                }
+            }
+
+            checkCollisions();
+            displayScore();
+
+            requestAnimationFrame(updateGameArea);
+        }
+
+        function checkCollisions() {
+            for (let i = playerBullets.length - 1; i >= 0; i--) {
+                const bullet = playerBullets[i];
+                for (let j = enemies.length - 1; j >= 0; j--) {
+                    const enemy = enemies[j];
+                    if (bullet.isColliding(enemy)) {
+                        playerBullets.splice(i, 1);
+                        enemy.health--;
+                        if (enemy.health <= 0) {
+                            score += 10;
+                            if (typeof enemy.destroy === 'function') enemy.destroy(); 
+                            enemies.splice(j, 1);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        function displayScore() {
+            ctx.fillStyle = '#ffffff';
+            ctx.font = '16px Arial';
+            ctx.fillText('Score: ' + score, 10, 20);
+            ctx.fillText('Mode: ' + (gameMode === 'easy' ? 'Easy' : 'Hard'), 10, 40);
+        }
+
+        function endGame() {
+            if (gameOver) return; // Prevent multiple calls
+            gameOver = true;
+            playGameOverSound(); // Play game over sound
+            clearInterval(enemySpawnInterval); 
+            enemies.forEach(enemy => { 
+                if (typeof enemy.destroy === 'function') enemy.destroy();
+            });
+            finalScoreText.textContent = 'Final Score: ' + score;
+            gameOverScreen.style.display = 'flex';
+        }
+
+        // --- Menu and Game Start/End Functionality ---
+
+        function showMainMenu() {
+            gameOverScreen.style.display = 'none';
+            canvas.style.display = 'none'; 
+            mainMenu.style.display = 'flex';
+        }
+
+        function startGame(mode) {
+            gameMode = mode;
+            if (mode === 'easy') {
+                spawnRateMultiplier = 2; 
+            } else {
+                spawnRateMultiplier = 0.7; 
+            }
+
+            mainMenu.style.display = 'none';
+            gameOverScreen.style.display = 'none';
+            canvas.style.display = 'block';
+
+            score = 0;
+            playerHealth = MAX_HEALTH; 
+            gameOver = false;
+            enemies = [];
+            playerBullets = [];
+            enemyProjectiles = [];
+            
+            player.x = 50;
+            player.y = CANVAS_HEIGHT / 2 - 15;
+            player.isHit = false;
+            player.color = player.originalColor;
+
+            enemySpawnInterval = setInterval(spawnEnemy, (1500 + Math.random() * 1000) * spawnRateMultiplier);
+            
+            requestAnimationFrame(updateGameArea);
+        }
+
+        showMainMenu(); 
+
+    </script>
+</body>
+</html>
